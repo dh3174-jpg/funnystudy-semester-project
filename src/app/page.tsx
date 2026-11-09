@@ -98,9 +98,9 @@ export default async function Home({
   return (
     <div
       id="home-root"
-      className="study-overview relative flex h-[100svh] flex-col overflow-hidden px-4 pt-6 pb-24 sm:px-6 sm:pt-7"
+      className="study-overview participant-document-page px-4 pt-5 pb-24 sm:px-6 sm:pt-6"
     >
-      <main id="home-content" className="mx-auto min-h-0 w-full max-w-[780px] flex-1 overflow-y-auto overscroll-contain px-1 pb-6">
+      <main id="home-content" className="mx-auto w-full max-w-[960px] px-1 pb-6">
         <StudyDashboard
           firstName={profile.first_name}
           studies={studyOverview}

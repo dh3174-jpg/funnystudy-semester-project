@@ -324,8 +324,11 @@ function createScenario({
     "@/components/DemographicQuestionCard": { DemographicQuestionCard: NullComponent },
     "@/lib/caption-images": { resolveStudyCaptionImageUrl: () => null },
   };
+  imports["@/components/StudyTiming"] = loadModule("src/components/StudyTiming.tsx", imports);
+  imports["@/components/StudyGroupSection"] = loadModule("src/components/StudyGroupSection.tsx", imports);
   imports["@/components/StudyDashboard"] = loadModule("src/components/StudyDashboard.tsx", {
     ...imports, "@/lib/studies": studiesModule,
+    "@/components/StudyIllustration": loadModule("src/components/StudyIllustration.tsx"),
   });
   imports["@/lib/studies"] = {
     ...studiesModule,
@@ -346,6 +349,7 @@ function createScenario({
   });
   return {
     home: loadModule("src/app/page.tsx", imports).default,
+    allStudies: (props = {}) => loadModule("src/app/studies/page.tsx", imports).default(props),
     study: loadModule("src/app/study/[studyId]/page.tsx", imports).default,
     activeStudies: (now) => studiesModule.fetchPublicActiveStudyIdentities(client, now),
     survey: loadModule("src/app/demographics/page.tsx", imports).default,
@@ -481,7 +485,10 @@ test("home lists public active studies after demographics and links to each stud
       studyRow(6, { is_private: null }),
     ],
   });
-  const html = renderToStaticMarkup(await scenario.home({}));
+  const home = renderToStaticMarkup(await scenario.home({}));
+  assert.match(home, /href="\/studies"/);
+  assert.doesNotMatch(home, /<details|Study (?:<!-- -->)?5</);
+  const html = renderToStaticMarkup(await scenario.allStudies());
   assert.match(html, /Available now/);
   assert.match(html, /Study (?:<!-- -->)?1</);
   assert.match(html, /Study (?:<!-- -->)?5</);
@@ -490,7 +497,7 @@ test("home lists public active studies after demographics and links to each stud
   assert.match(html, /UTC<\/time>/);
   assert.match(html, /No end date/);
   assert.deepEqual([...new Set([...html.matchAll(/href="(\/study\/\d+)"/g)].map((match) => match[1]))], ["/study/1", "/study/5"]);
-  assert.equal(scenario.studyLoads, 1);
+  assert.equal(scenario.studyLoads, 2);
   assert.deepEqual(scenario.captionLoads, [], "captions only load after choosing a study");
 
   const page = await scenario.study({ params: Promise.resolve({ studyId: "1" }) });
@@ -557,7 +564,7 @@ test("home marks only the current user's started-and-ended studies Completed", a
       { profile_id: "someone-else", study_id: 3, started_at: "2026-10-01T12:00:00Z", ended_at: "2026-10-01T13:00:00Z" },
     ],
   });
-  const html = renderToStaticMarkup(await scenario.home({}));
+  const html = renderToStaticMarkup(await scenario.allStudies());
   const cards = [...html.matchAll(/<li[^>]*>(.*?)<\/li>/g)].map((match) => match[1]);
   assert.match(cards[0], /Completed/);
   assert.match(cards[1], /In progress/);
@@ -608,7 +615,7 @@ test("progress lookup failures are visible and do not open an untracked study", 
   const scenario = createScenario({ answered: [1, 2], studies: [studyRow(1)], participationLoadError: true });
   const home = renderToStaticMarkup(await scenario.home({}));
   assert.match(home, /couldn&#x27;t load your study completion status/);
-  assert.match(home, /href="\/study\/1"/);
+  assert.match(home, /href="\/studies"/);
   const study = renderToStaticMarkup(await scenario.study({ params: Promise.resolve({ studyId: "1" }) }));
   assert.match(study, /couldn&#x27;t load your study progress/);
   assert.deepEqual(scenario.captionLoads, []);
@@ -704,10 +711,11 @@ test("closed and completed remain separate; completion count includes older stud
   });
   const html = renderToStaticMarkup(await scenario.home({}));
   assert.match(html, /3 studies completed/);
-  assert.match(html, /Closed · Completed/);
-  assert.match(html, /Participation is no longer available/);
-  assert.match(html, /href="\/study\/2"/);
-  assert.doesNotMatch(html, /href="\/study\/3"/);
+  const list = renderToStaticMarkup(await scenario.allStudies());
+  assert.match(list, /Closed · Completed/);
+  assert.match(list, /Participation is no longer available/);
+  assert.match(list, /href="\/study\/2"/);
+  assert.doesNotMatch(list, /href="\/study\/3"/);
   assert.match(html, /caught up/);
 });
 
@@ -717,17 +725,18 @@ test("dashboard errors never imply zero completions or fabricate a start action"
   const html = renderToStaticMarkup(await scenario.home({}));
   assert.match(html, /completion count is unavailable/);
   assert.doesNotMatch(html, /0 studies completed|Start Study|Continue Study/);
-  assert.match(html, /View study/);
+  assert.match(renderToStaticMarkup(await scenario.allStudies()), /View study/);
 });
 
 test("all completed active studies offer stats; empty grouped sections explain what is missing", async () => {
   const scenario = createScenario({ answered: [1, 2], studies: [studyRow(1)],
     participations: [{ profile_id: profileId, study_id: 1, started_at: "2026-01-01", ended_at: "2026-01-02" }] });
   const html = renderToStaticMarkup(await scenario.home({}));
-  assert.match(html, /View study stats/);
+  const list = renderToStaticMarkup(await scenario.allStudies());
+  assert.match(list, /View study stats/);
   assert.match(html, /1 study completed/);
   assert.match(html, /No upcoming studies scheduled yet/);
-  assert.match(html, /No studies closed in the past 30 days/);
+  assert.match(list, /No studies closed in the past 30 days/);
   assert.doesNotMatch(html, /Start Study|Continue Study/);
 });
 
@@ -772,7 +781,7 @@ test("overview continues a started study and surfaces the nearest opening withou
   const feature = html.slice(html.indexOf('id="available-heading"'), html.indexOf('id="upcoming-heading"'));
   assert.match(feature, /Study 2/);
   assert.match(feature, /Continue Study/);
-  const upcoming = html.slice(html.indexOf('id="upcoming-heading"'), html.indexOf("<details"));
+  const upcoming = html.slice(html.indexOf('id="upcoming-heading"'), html.indexOf('<nav class="overview-all"'));
   assert.match(upcoming, /Study 4/);
   assert.doesNotMatch(upcoming, /Study 3|href=/);
   assert.doesNotMatch(html, /href="\/study\/(3|4)"/);
@@ -788,7 +797,155 @@ test("skipping every remaining demographic question preserves submitted answers 
 test("participant home exposes existing reminders without requesting contact information", async () => {
   const scenario = createScenario({ answered: [1, 2] });
   const html = renderToStaticMarkup(await scenario.home({}));
-  assert.match(html, /href="\/settings"[^>]*>Reminder preferences/);
-  assert.match(html, /active studies you haven’t finished/);
+  assert.match(html, /href="\/settings"/);
+  assert.match(html, /Reminder preferences/);
+  assert.match(html, /Manage optional study reminders/);
   assert.doesNotMatch(html, /type="tel"|calendar.google|push notifications/i);
+});
+
+test("Iteration 2 keeps the central reading order and uses decorative line art without artificial progress", async () => {
+  const scenario = createScenario({ answered: [1, 2], studies: [studyRow(1)] });
+  const html = renderToStaticMarkup(await scenario.home({}));
+  assert.match(html, /Ready for your next study/);
+  const sections = ["overview-header", "overview-feature ", "overview-upcoming", "overview-all", "overview-progress", "overview-utilities"];
+  const positions = sections.map(name => html.indexOf(name));
+  assert.ok(positions.every(position => position >= 0));
+  assert.deepEqual([...positions].sort((a, b) => a - b), positions);
+  assert.match(html, /overview-feature-active/);
+  assert.match(html, /aria-hidden="true"[^>]*focusable="false"[^>]*class="overview-illustration overview-illustration-note"/);
+  assert.match(html, /overview-illustration-sprout/);
+  assert.doesNotMatch(html, /overview-progress-track|overview-flower|overview-corner-mark|role="progressbar"/);
+  assert.match(html, /href="\/studies"/);
+  assert.doesNotMatch(html, /<details|all-active|all-upcoming|all-closed/);
+});
+
+test("Iteration 2 preserves empty and unavailable presentation without inventing participation", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const empty = renderToStaticMarkup(await createScenario({ answered: [1, 2] }).home({}));
+  assert.match(empty, /overview-feature-empty/);
+  assert.match(empty, /No active studies/);
+  assert.match(empty, /No upcoming studies scheduled yet/);
+  assert.doesNotMatch(empty, /Start Study|Continue Study/);
+  const unavailable = renderToStaticMarkup(await createScenario({
+    answered: [1, 2], studies: [studyRow(1)], participationLoadError: true,
+  }).home({}));
+  assert.match(unavailable, /completion count is unavailable/);
+  assert.doesNotMatch(unavailable, /0 studies completed|Start Study|Continue Study/);
+  const failed = renderToStaticMarkup(await createScenario({ answered: [1, 2], studyLoadError: true }).home({}));
+  assert.match(failed, /overview-message-error/);
+  assert.match(failed, /role="alert"/);
+  assert.doesNotMatch(failed, /No active studies|Start Study|Continue Study/);
+});
+
+test("all studies is protected and retains notification/demographic destinations", async () => {
+  const signedOut = createScenario({ user: false });
+  await assert.rejects(signedOut.allStudies(), error => error instanceof Redirect && error.path === "/login");
+  assert.equal(signedOut.studyLoads, 0);
+  const notifications = createScenario({ notificationPreferences: { notify_new_study_email: null } });
+  await assert.rejects(notifications.allStudies(), error => error instanceof Redirect
+    && error.path === "/notification-preferences?next=%2Fstudies");
+  assert.equal(notifications.studyLoads, 0);
+  const survey = createScenario();
+  await assert.rejects(survey.allStudies(), error => error instanceof Redirect && error.path === "/demographics?next=%2Fstudies");
+  assert.equal(survey.studyLoads, 0);
+});
+
+test("all studies shows all groups with bounded history, public filtering and correct actions", async () => {
+  const past = new Date(Date.now() - 86400000).toISOString();
+  const future = new Date(Date.now() + 86400000).toISOString();
+  const scenario = createScenario({ answered: [1, 2], studies: [
+    studyRow(1), studyRow(2), studyRow(3, { start_datetime_utc: future }),
+    studyRow(4, { end_datetime_utc: past }), studyRow(5, { is_private: true }),
+    studyRow(6, { end_datetime_utc: new Date(Date.now() - 31 * 86400000).toISOString() }),
+  ], participations: [{ profile_id: profileId, study_id: 2, started_at: past, ended_at: null }] });
+  const html = renderToStaticMarkup(await scenario.allStudies());
+  assert.match(html, /<h1>All studies/);
+  assert.match(html, /href="\/"/);
+  assert.match(html, /id="studies-active"/);
+  assert.match(html, /id="studies-upcoming"/);
+  assert.match(html, /id="studies-closed"/);
+  assert.match(html, /Start Study/);
+  assert.match(html, /Continue Study/);
+  assert.match(html, /Opens/);
+  assert.match(html, /Closed/);
+  assert.match(html, /Participation is no longer available/);
+  assert.doesNotMatch(html, /Study (?:<!-- -->)?(?:5|6)</);
+  assert.deepEqual([...html.matchAll(/href="(\/study\/\d+)"/g)].map(match => match[1]), ["/study/1", "/study/2"]);
+  assert.deepEqual(scenario.captionLoads, []);
+});
+
+test("all studies distinguishes empty groups from query and participation failures", async t => {
+  t.mock.method(console, "error", () => {});
+  const empty = renderToStaticMarkup(await createScenario({ answered: [1, 2] }).allStudies());
+  for (const copy of [/No active studies/, /No upcoming studies scheduled yet/, /No studies closed in the past 30 days/]) assert.match(empty, copy);
+  const failed = renderToStaticMarkup(await createScenario({ answered: [1, 2], studyLoadError: true }).allStudies());
+  assert.match(failed, /couldn&#x27;t load studies/);
+  assert.match(failed, /action="\/studies"/);
+  assert.doesNotMatch(failed, /No active studies|Start Study/);
+  const unavailable = renderToStaticMarkup(await createScenario({ answered: [1, 2], studies: [studyRow(1)], participationLoadError: true }).allStudies());
+  assert.match(unavailable, /couldn&#x27;t load your study completion status/);
+  assert.match(unavailable, /View study/);
+  assert.doesNotMatch(unavailable, /Start Study|Continue Study|Completed/);
+});
+
+test("home and all studies use document shells, while study taking keeps its intentional viewport", async () => {
+  const scenario = createScenario({ answered: [1, 2], studies: [studyRow(1)] });
+  for (const page of [await scenario.home({}), await scenario.allStudies()]) {
+    assert.match(page.props.className, /participant-document-page/);
+    assert.doesNotMatch(page.props.className, /overflow-hidden|h-\[100svh\]/);
+    const children = Array.isArray(page.props.children) ? page.props.children : [page.props.children];
+    const main = children.find(child => child?.type === "main");
+    assert.ok(main);
+    assert.doesNotMatch(main.props.className, /overflow-y-auto|overscroll-contain|flex-1/);
+  }
+  const study = await scenario.study({ params: Promise.resolve({ studyId: "1" }) });
+  assert.match(study.props.className, /overflow-hidden/);
+  assert.doesNotMatch(study.props.className, /participant-document-page/);
+});
+
+test("supporting icons have small intrinsic dimensions and reminder title/copy have a real line break", async () => {
+  const html = renderToStaticMarkup(await createScenario({ answered: [1, 2] }).home({}));
+  const upcoming = html.slice(html.indexOf('<section aria-labelledby="upcoming-heading"'), html.indexOf('<nav class="overview-all"'));
+  assert.match(upcoming, /width="24" height="24"/);
+  assert.match(upcoming, /No upcoming studies scheduled yet/);
+  const reminder = html.slice(html.indexOf('<div class="overview-utilities"'));
+  assert.match(reminder, /width="24" height="24"/);
+  assert.match(reminder, /Reminder preferences<\/span><br\/><span class="overview-reminder-copy">Manage optional study reminders/);
+  assert.doesNotMatch(reminder, /Optional reminders concern/);
+});
+
+test("studies groups retain compact styled empty states and status labels", async () => {
+  const scenario = createScenario({ answered: [1, 2] });
+  const empty = renderToStaticMarkup(await scenario.allStudies());
+  assert.equal([...empty.matchAll(/class="studies-empty overview-muted"/g)].length, 3);
+  assert.match(empty, /No active studies right now/);
+  for (const kind of ["active", "upcoming", "closed"]) assert.ok(empty.includes("studies-group-" + kind));
+  const populated = renderToStaticMarkup(await createScenario({ answered: [1, 2], studies: [studyRow(1)] }).allStudies());
+  assert.match(populated, /class="studies-status">Available now/);
+});
+
+test("reference composition uses real study identifiers and keeps the rich empty hero", async () => {
+  const populated = renderToStaticMarkup(await createScenario({ answered: [1, 2], studies: [studyRow(42)] }).home({}));
+  assert.match(populated, /<p class="overview-greeting-name">Hi, Test/);
+  assert.match(populated, /<h1>Ready for your next study\?<\/h1>/);
+  assert.match(populated, /Study 42/);
+  assert.match(populated, /overview-feature-content/);
+  assert.match(populated, /overview-feature-art/);
+  assert.match(populated, /overview-brain/);
+  assert.match(populated, /overview-leaf-pink/);
+  assert.match(populated, /overview-leaf-butter/);
+  assert.doesNotMatch(populated, /Humor &amp; Memory|About 10 minutes|Closes Nov 10|Humor Research Collective/i);
+  const empty = renderToStaticMarkup(await createScenario({ answered: [1, 2] }).home({}));
+  assert.match(empty, /overview-feature-empty/);
+  assert.match(empty, /overview-feature-art/);
+  assert.match(empty, /overview-brain/);
+  assert.doesNotMatch(empty, /Start Study|Continue Study/);
+});
+
+test("all studies uses grouped surfaces and a real action control without changing its destination", async () => {
+  const html = renderToStaticMarkup(await createScenario({ answered: [1, 2], studies: [studyRow(42)] }).allStudies());
+  assert.match(html, /Your participation/);
+  assert.equal([...html.matchAll(/class="studies-group-body"/g)].length, 3);
+  assert.match(html, /class="overview-link studies-action studies-action-primary" href="\/study\/42"/);
+  assert.doesNotMatch(html, /Humor Research Collective|type="submit"[^>]*>Start/);
 });
