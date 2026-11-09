@@ -1,3 +1,4 @@
+import { getAuthOrigin } from "@/lib/auth-origin";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
@@ -9,45 +10,14 @@ import { createClient } from "@/lib/supabase/server";
 import { DEMOGRAPHIC_SKIPS_COOKIE } from "@/lib/demographic-skips";
 import { buildNotificationPreferencesPath, fetchNotificationPreferences, notificationNextPath, NOTIFICATION_SKIPS_COOKIE } from "@/lib/notification-preferences";
 
-const FALLBACK_SITE_URL = "http://localhost:3000";
-
-const getConfiguredSiteOrigin = () => {
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-
-  if (!siteUrl) {
-    return null;
-  }
-
-  try {
-    return new URL(siteUrl).origin;
-  } catch {
-    return null;
-  }
-};
-
-const getRedirectOrigin = (request: Request) => {
-  const configuredSiteOrigin = getConfiguredSiteOrigin();
-
-  if (configuredSiteOrigin) {
-    return configuredSiteOrigin;
-  }
-
-  const forwardedHost =
-    request.headers.get("x-forwarded-host") ?? request.headers.get("host");
-  const forwardedProto =
-    request.headers.get("x-forwarded-proto") ??
-    (forwardedHost?.includes("localhost") ? "http" : "https");
-
-  if (forwardedHost) {
-    return `${forwardedProto}://${forwardedHost}`;
-  }
-
-  return FALLBACK_SITE_URL;
-};
+// Log structured identifiers only, never raw messages, codes, tokens, or cookies.
+const diagnosticIdentifier = (value: unknown) =>
+  typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(value)
+    ? value : undefined;
 
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
-  const redirectOrigin = getRedirectOrigin(request);
+  const redirectOrigin = getAuthOrigin(request);
   const code = requestUrl.searchParams.get("code");
   const cookieStore = await cookies();
   const next = notificationNextPath(
@@ -56,9 +26,18 @@ export async function GET(request: Request) {
 
   if (code) {
     const supabase = await createClient({ allowCookieWrite: true });
+    const hasCodeVerifier = cookieStore.getAll().some(({ name, value }) =>
+      /^sb-.+-funnystudy-auth-token-code-verifier(?:\.\d+)?$/.test(name) && Boolean(value)
+    );
     const { error } = await supabase.auth.exchangeCodeForSession(code);
 
     if (error) {
+      console.error("[Auth callback] code exchange failed", {
+        name: diagnosticIdentifier(error.name),
+        code: diagnosticIdentifier(error.code),
+        status: typeof error.status === "number" ? error.status : undefined,
+        hasCodeVerifier,
+      });
       const redirectUrl = new URL("/login", redirectOrigin);
       redirectUrl.searchParams.set(
         "message",

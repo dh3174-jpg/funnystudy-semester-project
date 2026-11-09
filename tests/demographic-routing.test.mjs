@@ -30,6 +30,7 @@ function loadModule(path, imports = {}) {
 const settingsModule = loadModule("src/lib/account-settings.ts");
 const skips = loadModule("src/lib/demographic-skips.ts");
 const urls = loadModule("src/lib/url.ts");
+const authOrigin = loadModule("src/lib/auth-origin.ts");
 const captionOrderModule = loadModule("src/lib/study-caption-order.ts");
 const studiesModule = loadModule("src/lib/studies.ts", {
   "@/lib/study-caption-order": captionOrderModule,
@@ -231,6 +232,7 @@ function createScenario({
   if (notificationSkips) cookieValues.set("notification_skips", notificationSkips);
   if (skipped) cookieValues.set(skips.DEMOGRAPHIC_SKIPS_COOKIE, skipped);
   const cookieStore = {
+    getAll: () => [...cookieValues].map(([name, value]) => ({ name, value })),
     get: (name) => cookieValues.has(name) ? { value: cookieValues.get(name) } : undefined,
     delete: (name) => cookieValues.delete(name),
   };
@@ -308,6 +310,7 @@ function createScenario({
     "@/lib/supabase/server": { createClient: async () => client },
     "@/lib/study-participation": participationModule,
     "@/lib/url": urls,
+    "@/lib/auth-origin": authOrigin,
     "@/lib/account-settings": settingsModule,
     "@/lib/demographic-skips": skips,
     "@/app/profile-actions": { signOut: async () => {} },

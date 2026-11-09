@@ -32,6 +32,7 @@ class Redirect extends Error {
 
 const settingsModule = loadModule("src/lib/account-settings.ts");
 const urls = loadModule("src/lib/url.ts");
+const authOrigin = loadModule("src/lib/auth-origin.ts");
 const notificationModule = loadModule("src/lib/notification-preferences.ts", {
   "@/lib/account-settings": settingsModule, "@/lib/url": urls, "@/lib/supabase/server": {},
 });
@@ -644,6 +645,7 @@ test("OAuth rejects absent or forged terms choices before contacting Auth and pr
   let authCalls = 0;
   const { POST } = loadModule("src/app/auth/login/route.ts", {
     "@/lib/url": urls,
+    "@/lib/auth-origin": authOrigin,
     "@/lib/supabase/server": { createClient: async () => { authCalls++; throw new Error("Must not contact Auth"); } },
     "next/server": { NextResponse: { redirect: (url, status) => ({ location: String(url), status }) } },
   });
@@ -672,6 +674,7 @@ test("accepted site terms keep the clean OAuth callback and do not write notific
   try {
     const { POST } = loadModule("src/app/auth/login/route.ts", {
       "@/lib/url": urls,
+    "@/lib/auth-origin": authOrigin,
       "@/lib/supabase/server": { createClient: async (option) => {
         options.push(option);
         return { auth: { signInWithOAuth: async (call) => { calls.push(call); return { data: { url: "https://accounts.google.test/authorize" }, error: null }; } } };
@@ -682,7 +685,7 @@ test("accepted site terms keep the clean OAuth callback and do not write notific
     data.set("site_terms", "on");
     data.set("next", "/study/42");
     data.set("notify_new_study_email", "on");
-    const result = await POST(new Request("https://internal.test/auth/login", { method: "POST", body: data }));
+    const result = await POST(new Request("https://fixture.test/auth/login", { method: "POST", body: data }));
     assert.equal(result.status, 303);
     assert.equal(result.location, "https://accounts.google.test/authorize");
     assert.deepEqual(options, [{ allowCookieWrite: true, autoRefreshToken: false }]);
@@ -695,4 +698,155 @@ test("accepted site terms keep the clean OAuth callback and do not write notific
     if (previousGoogle === undefined) delete process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID; else process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID = previousGoogle;
     if (previousSite === undefined) delete process.env.NEXT_PUBLIC_SITE_URL; else process.env.NEXT_PUBLIC_SITE_URL = previousSite;
   }
+});
+
+function authEnvironment(t, site, mode = "production") {
+  const previous = {
+    NODE_ENV: process.env.NODE_ENV,
+    NEXT_PUBLIC_SITE_URL: process.env.NEXT_PUBLIC_SITE_URL,
+    NEXT_PUBLIC_GOOGLE_CLIENT_ID: process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID,
+  };
+  process.env.NODE_ENV = mode;
+  if (site === undefined) delete process.env.NEXT_PUBLIC_SITE_URL;
+  else process.env.NEXT_PUBLIC_SITE_URL = site;
+  process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID = "fixture-google-client";
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+}
+
+test("auth origin prefers a valid canonical URL and normalizes whitespace and paths", t => {
+  authEnvironment(t, " https://canonical.test/some/path?ignored=true ");
+  const request = new Request("https://preview.test/auth/login", {
+    headers: { "x-forwarded-host": "proxy.test", "x-forwarded-proto": "https" },
+  });
+  assert.equal(authOrigin.getAuthOrigin(request), "https://canonical.test");
+  assert.equal(authOrigin.getAuthRequestOrigin(request), "https://proxy.test");
+});
+
+test("invalid site URLs use the public request origin, never the production localhost fallback", t => {
+  authEnvironment(t, undefined);
+  for (const value of ["", "  ", "not a URL", "javascript:alert(1)", "ftp://host.test", "https://user:password@host.test"]) {
+    process.env.NEXT_PUBLIC_SITE_URL = value;
+    assert.equal(authOrigin.getAuthOrigin(new Request("https://public.test/auth/callback?code=secret")), "https://public.test");
+    assert.throws(() => authOrigin.getAuthOrigin({ url: "invalid", headers: new Headers() }), /public origin/);
+    assert.throws(() => authOrigin.getAuthOrigin(new Request("http://localhost:3000")), /public origin/);
+  }
+});
+
+test("localhost keeps the actual development port and has a development-only fallback", t => {
+  authEnvironment(t, undefined, "development");
+  assert.equal(authOrigin.getAuthOrigin(new Request("http://localhost:3002/auth/login")), "http://localhost:3002");
+  assert.equal(authOrigin.getAuthOrigin(new Request("http://127.0.0.1:3014/auth/callback")), "http://127.0.0.1:3014");
+  assert.equal(authOrigin.getAuthOrigin({ url: "invalid", headers: new Headers() }), "http://localhost:3000");
+  process.env.NEXT_PUBLIC_SITE_URL = "http://localhost:3002/";
+  assert.equal(authOrigin.getAuthOrigin(new Request("http://localhost:3002")), "http://localhost:3002");
+});
+
+test("forwarded origin handles TLS termination and does not loop on the canonical host", t => {
+  authEnvironment(t, "https://canonical.test");
+  const request = new Request("http://internal.test/auth/login", {
+    headers: { "x-forwarded-host": "canonical.test", "x-forwarded-proto": "https" },
+  });
+  assert.equal(authOrigin.getAuthRequestOrigin(request), authOrigin.getAuthOrigin(request));
+  assert.equal(authOrigin.getAuthRequestOrigin(new Request("https://public.test", {
+    headers: { "x-forwarded-host": "attacker.test/path" },
+  })), "https://public.test");
+});
+
+test("preview sign-in reaches the canonical host before creating a real SDK PKCE verifier", async t => {
+  authEnvironment(t, "https://canonical.test/");
+  const { createServerClient } = require("@supabase/ssr");
+  const cookieJar = new Map(), calls = [];
+  let authHost;
+  const { POST } = loadModule("src/app/auth/login/route.ts", {
+    "@/lib/url": urls, "@/lib/auth-origin": authOrigin,
+    "@/lib/supabase/server": { createClient: async () => {
+      calls.push(authHost);
+      return createServerClient("https://fixture.supabase.test", "fixture-public-key", {
+        cookieOptions: authCookieModule.getSupabaseAuthCookieOptions("https://fixture.supabase.test"),
+        cookies: {
+          getAll: () => [...cookieJar].map(([name, value]) => ({ name, value })),
+          setAll: values => values.forEach(({ name, value }) => cookieJar.set(name, value)),
+        },
+      });
+    } },
+    "next/server": { NextResponse: { redirect: (url, status) => ({
+      location: String(url), status, cookies: { set: ({ name, value }) => cookieJar.set(name, value) },
+    }) } },
+  });
+  const body = new FormData();
+  body.set("site_terms", "on");
+  body.set("next", "/study/42");
+  authHost = "preview";
+  const response = await POST(new Request("https://preview.test/auth/login", { method: "POST", body }));
+  assert.equal(response.status, 307, "preserves POST body during the canonical handoff");
+  assert.equal(response.location, "https://canonical.test/auth/login");
+  assert.deepEqual(calls, []);
+  assert.equal(cookieJar.size, 0, "no verifier cookie on the preview host");
+
+  authHost = "canonical";
+  const result = await POST(new Request(response.location, { method: "POST", body }));
+  assert.equal(result.status, 303);
+  assert.deepEqual(calls, ["canonical"]);
+  const authorize = new URL(result.location);
+  assert.equal(authorize.searchParams.get("redirect_to"), "https://canonical.test/auth/callback");
+  assert.equal(authorize.searchParams.get("code_challenge_method"), "s256");
+  assert.ok(authorize.searchParams.get("code_challenge"));
+  assert.ok(cookieJar.get("sb-fixture-funnystudy-auth-token-code-verifier"));
+  assert.equal(cookieJar.get("login_next"), "/study/42");
+});
+
+test("canonical handoff still rejects missing consent without starting OAuth", async t => {
+  authEnvironment(t, "https://canonical.test");
+  let calls = 0;
+  const { POST } = loadModule("src/app/auth/login/route.ts", {
+    "@/lib/url": urls, "@/lib/auth-origin": authOrigin,
+    "@/lib/supabase/server": { createClient: async () => { calls++; } },
+    "next/server": { NextResponse: { redirect: (url, status) => ({ location: String(url), status }) } },
+  });
+  const body = new FormData(); body.set("next", "/study/42");
+  const response = await POST(new Request("https://preview.test/auth/login", { method: "POST", body }));
+  assert.equal(response.status, 303);
+  assert.equal(new URL(response.location).origin, "https://canonical.test");
+  assert.equal(new URL(response.location).searchParams.get("redirectedFrom"), "/study/42");
+  assert.equal(calls, 0);
+});
+
+test("exchange failure logs only safe identifiers and verifier presence; browser message stays generic", async t => {
+  authEnvironment(t, "https://canonical.test");
+  const logged = [];
+  t.mock.method(console, "error", (...args) => logged.push(args));
+  const cookieJar = new Map([
+    ["login_next", "/study/42"],
+    ["sb-fixture-funnystudy-auth-token-code-verifier", "PRIVATE_VERIFIER"],
+  ]);
+  const { GET } = loadModule("src/app/auth/callback/route.ts", {
+    "@/lib/auth-origin": authOrigin,
+    "@/lib/demographic-skips": { DEMOGRAPHIC_SKIPS_COOKIE: "demographic_skips" },
+    "@/lib/notification-preferences": { notificationNextPath: notificationModule.notificationNextPath },
+    "@/lib/demographics": {},
+    "next/headers": { cookies: async () => ({
+      get: name => cookieJar.has(name) ? { value: cookieJar.get(name) } : undefined,
+      getAll: () => [...cookieJar].map(([name, value]) => ({ name, value })),
+    }) },
+    "@/lib/supabase/server": { createClient: async () => ({ auth: {
+      exchangeCodeForSession: async code => {
+        assert.equal(code, "PRIVATE_CODE");
+        return { error: { name: "AuthApiError", code: "bad_code_verifier", status: 400,
+          message: "PRIVATE_MESSAGE", access_token: "PRIVATE_TOKEN" } };
+      },
+    } }) },
+    "next/server": { NextResponse: { redirect: (url, status) => ({ location: String(url), status }) } },
+  });
+  const result = await GET(new Request("https://canonical.test/auth/callback?code=PRIVATE_CODE"));
+  assert.equal(result.status, 303);
+  assert.equal(new URL(result.location).origin, "https://canonical.test");
+  assert.equal(new URL(result.location).searchParams.get("message"), "Unable to complete sign-in. Please try again.");
+  assert.deepEqual(logged, [["[Auth callback] code exchange failed", {
+    name: "AuthApiError", code: "bad_code_verifier", status: 400, hasCodeVerifier: true,
+  }]]);
+  assert.doesNotMatch(JSON.stringify({ logged, result }), /PRIVATE_/);
 });

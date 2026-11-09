@@ -1,16 +1,14 @@
 import { NextResponse } from "next/server";
 
 import { createClient } from "@/lib/supabase/server";
+import { getAuthOrigin, getAuthRequestOrigin } from "@/lib/auth-origin";
 import { normalizeRelativePath } from "@/lib/url";
 
 export async function POST(request: Request) {
   const formData = await request.formData();
 
   const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
-  const requestUrl = new URL(request.url);
-  const origin =
-    process.env.NEXT_PUBLIC_SITE_URL ??
-    `${requestUrl.protocol}//${requestUrl.host}`;
+  const origin = getAuthOrigin(request);
   const next = normalizeRelativePath(formData.get("next")?.toString());
   const redirectTo = new URL("/auth/callback", origin);
 
@@ -19,6 +17,13 @@ export async function POST(request: Request) {
     loginUrl.searchParams.set("message", "Please confirm that you are 18 or older, are in the United States, and agree to the Terms of Use.");
     loginUrl.searchParams.set("redirectedFrom", next);
     return NextResponse.redirect(loginUrl, 303);
+  }
+
+  // Set the PKCE verifier on the host that will receive the callback.
+  // 307 preserves the native POST, consent, and destination; no Auth call or
+  // verifier cookie is created on a preview/deployment hostname.
+  if (getAuthRequestOrigin(request) !== origin) {
+    return NextResponse.redirect(new URL("/auth/login", origin), 307);
   }
 
   if (!googleClientId) {
